@@ -1,11 +1,11 @@
+#![feature(box_patterns)]
 #![feature(try_from)]
 
 mod cmd;
 
-use self::cmd::{Cmd, ParseError};
+use self::cmd::{Expression, ParseError};
 use std::convert::TryFrom;
 use std::io::{self, Write};
-use std::process::Command;
 
 fn main() -> Result<(), io::Error> {
     let stdin = io::stdin();
@@ -17,20 +17,10 @@ fn main() -> Result<(), io::Error> {
         stdout.flush()?;
         stdin.read_line(&mut line)?;
 
-        match Cmd::try_from(line.as_ref()) {
-            Ok(cmd) => match Command::new(cmd.binary).args(cmd.args).output() {
-                Ok(output) => {
-                    if output.status.success() {
-                        io::stdout().write(&output.stdout)?;
-                    } else {
-                        io::stderr().write(&output.stderr)?;
-                    }
-                }
-
-                Err(e) => {
-                    eprintln!("{}", e);
-                }
-            },
+        match Expression::try_from(line.as_ref()) {
+            Ok(expr) => {
+                expr.run();
+            }
 
             Err(ParseError::EmptyLine) => {}
         }

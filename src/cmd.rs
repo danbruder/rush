@@ -1,12 +1,79 @@
 use std::convert::TryFrom;
 use std::ffi::OsStr;
+use std::io::{self, Write};
+use std::process::Command;
 use std::str::SplitWhitespace;
+use std::vec::IntoIter;
+
+pub enum Expression<'a> {
+    Cmd(Cmd<'a>),
+
+    Compound(Box<Compound<'a>>),
+}
 
 // A command consists of a binary and its arguments
 #[derive(Debug)]
 pub struct Cmd<'a> {
     pub binary: &'a OsStr,
     pub args: LineIter<'a>,
+}
+
+#[derive(Debug)]
+pub struct LineIter<'a>(SplitWhitespace<'a>);
+
+pub struct Compound<'a> {
+    pub op: Op,
+    pub left: Expression<'a>,
+    pub right: Expression<'a>,
+}
+
+pub enum Op {
+    Semicolon,
+}
+
+impl<'a> TryFrom<&'a str> for Expression<'a> {
+    type Error = ParseError;
+
+    // Extract the expression from the commandline
+    fn try_from(line: &'a str) -> Result<Self, Self::Error> {
+        let mut cmds = vec![];
+
+        for cmd in line.split(';') {
+            cmds.push(Cmd::try_from(cmd)?);
+        }
+
+        Ok(Self::build_semicolon_expression(cmds.into_iter()))
+    }
+}
+
+impl<'a> Expression<'a> {
+    pub fn run(self) -> bool {
+        match self {
+            Expression::Cmd(cmd) => cmd.run(),
+
+            Expression::Compound(compound) => match compound.op {
+                Op::Semicolon => {
+                    compound.left.run();
+                    compound.right.run()
+                }
+            },
+        }
+    }
+
+    fn build_semicolon_expression(mut cmds: IntoIter<Cmd<'a>>) -> Expression<'a> {
+        assert!(cmds.len() >= 1);
+        let cmd_left = cmds.next().unwrap();
+
+        if cmds.len() == 0 {
+            Expression::Cmd(cmd_left)
+        } else {
+            Expression::Compound(Box::new(Compound {
+                op: Op::Semicolon,
+                left: Expression::Cmd(cmd_left),
+                right: Expression::build_semicolon_expression(cmds),
+            }))
+        }
+    }
 }
 
 impl<'a> TryFrom<&'a str> for Cmd<'a> {
@@ -16,7 +83,8 @@ impl<'a> TryFrom<&'a str> for Cmd<'a> {
     fn try_from(line: &'a str) -> Result<Self, Self::Error> {
         let mut line_iter = LineIter(line.split_whitespace());
 
-        let binary = line_iter.next()
+        let binary = line_iter
+            .next()
             .map(OsStr::new)
             .ok_or(ParseError::EmptyLine)?;
 
@@ -27,10 +95,28 @@ impl<'a> TryFrom<&'a str> for Cmd<'a> {
     }
 }
 
-#[derive(Debug)]
-pub struct LineIter<'a>(SplitWhitespace<'a>);
+impl<'a> Cmd<'a> {
+    pub fn run(self) -> bool {
+        match Command::new(&self.binary).args(self.args).output() {
+            Ok(output) => {
+                if output.status.success() {
+                    let _ = io::stdout().write(&output.stdout);
+                } else {
+                    let _ = io::stderr().write(&output.stderr);
+                }
 
-impl<'a> std::iter::Iterator for LineIter<'a> {
+                output.status.success()
+            }
+
+            Err(e) => {
+                eprintln!("{}", e);
+                false
+            }
+        }
+    }
+}
+
+impl<'a> Iterator for LineIter<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -69,5 +155,36 @@ mod test {
         assert_eq!(cmd.args.next(), Some("2"));
         assert_eq!(cmd.args.next(), Some("3"));
         assert_eq!(cmd.args.next(), None);
+    }
+
+    #[test]
+    fn test_semicolon_expression() {
+        match Expression::try_from("echo 1 2 3; ls").unwrap() {
+            Expression::Compound(box Compound {
+                op: Op::Semicolon,
+                left:
+                    Expression::Cmd(Cmd {
+                        binary: binary_left,
+                        args: mut args_left,
+                    }),
+
+                right:
+                    Expression::Cmd(Cmd {
+                        binary: binary_right,
+                        args: mut args_right,
+                    }),
+            }) => {
+                assert_eq!(binary_left, OsStr::new("echo"));
+                assert_eq!(args_left.next(), Some("1"));
+                assert_eq!(args_left.next(), Some("2"));
+                assert_eq!(args_left.next(), Some("3"));
+                assert_eq!(args_left.next(), None);
+
+                assert_eq!(binary_right, OsStr::new("ls"));
+                assert_eq!(args_right.next(), None);
+            }
+
+            _ => assert!(false),
+        }
     }
 }
