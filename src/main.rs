@@ -1,6 +1,9 @@
+#![feature(try_from)]
+
 mod cmd;
 
 use self::cmd::{Cmd, ParseError};
+use std::convert::TryFrom;
 use std::io::{self, Write};
 use std::process::Command;
 
@@ -14,7 +17,7 @@ fn main() -> Result<(), io::Error> {
         stdout.flush()?;
         stdin.read_line(&mut line)?;
 
-        match Cmd::parse_from(&line) {
+        match Cmd::try_from(line.as_ref()) {
             Ok(cmd) => match Command::new(cmd.binary).args(cmd.args).output() {
                 Ok(output) => {
                     if output.status.success() {
