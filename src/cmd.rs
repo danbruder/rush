@@ -1,7 +1,7 @@
 use std::convert::TryFrom;
 use std::ffi::OsStr;
 use std::io::{self, Write};
-use std::process::Command;
+use std::process::{self, Command};
 use std::str::SplitWhitespace;
 use std::vec::IntoIter;
 
@@ -11,11 +11,23 @@ pub enum Expression<'a> {
     Compound(Box<Compound<'a>>),
 }
 
-// A command consists of a binary and its arguments
 #[derive(Debug)]
-pub struct Cmd<'a> {
+pub enum Cmd<'a> {
+    // An invokable command consists of a binary and its arguments
+    Invoke(Invoke<'a>),
+
+    Builtin(Builtin),
+}
+
+#[derive(Debug)]
+pub struct Invoke<'a> {
     pub binary: &'a OsStr,
     pub args: LineIter<'a>,
+}
+
+#[derive(Debug)]
+pub enum Builtin {
+    Exit(i32),
 }
 
 #[derive(Debug)]
@@ -111,29 +123,41 @@ impl<'a> TryFrom<&'a str> for Cmd<'a> {
             .map(OsStr::new)
             .ok_or(ParseError::EmptyLine)?;
 
-        Ok(Cmd {
-            binary,
-            args: line_iter,
-        })
+        match binary.to_str() {
+            Some("exit") => Ok(Cmd::Builtin(Builtin::Exit(0))),
+            Some(_) => Ok(Cmd::Invoke(Invoke {
+                binary,
+                args: line_iter,
+            })),
+            _ => Err(ParseError::NoCmd),
+        }
     }
 }
 
 impl<'a> Cmd<'a> {
     pub fn run(self) -> bool {
-        match Command::new(&self.binary).args(self.args).output() {
-            Ok(output) => {
-                if output.status.success() {
-                    let _ = io::stdout().write(&output.stdout);
-                } else {
-                    let _ = io::stderr().write(&output.stderr);
-                }
-
-                output.status.success()
+        match self {
+            Cmd::Builtin(Builtin::Exit(status)) => {
+                process::exit(status);
             }
 
-            Err(e) => {
-                eprintln!("{}", e);
-                false
+            Cmd::Invoke(Invoke { binary, args }) => {
+                match Command::new(&binary).args(args).output() {
+                    Ok(output) => {
+                        if output.status.success() {
+                            let _ = io::stdout().write(&output.stdout);
+                        } else {
+                            let _ = io::stderr().write(&output.stderr);
+                        }
+
+                        output.status.success()
+                    }
+
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        false
+                    }
+                }
             }
         }
     }
@@ -150,6 +174,7 @@ impl<'a> Iterator for LineIter<'a> {
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
     EmptyLine,
+    NoCmd,
 }
 
 #[cfg(test)]
@@ -163,21 +188,40 @@ mod test {
 
     #[test]
     fn test_single_binary() {
-        let mut cmd = Cmd::try_from("echo").unwrap();
+        let cmd = Cmd::try_from("echo").unwrap();
 
-        assert_eq!(cmd.binary, OsStr::new("echo"));
-        assert_eq!(cmd.args.next(), None);
+        if let Cmd::Invoke(Invoke { binary, mut args }) = cmd {
+            assert_eq!(binary, OsStr::new("echo"));
+            assert_eq!(args.next(), None);
+        } else {
+            assert!(false);
+        }
     }
 
     #[test]
     fn test_binary_with_arguments() {
-        let mut cmd = Cmd::try_from("echo 1 2 3").unwrap();
+        let cmd = Cmd::try_from("echo 1 2 3").unwrap();
 
-        assert_eq!(cmd.binary, OsStr::new("echo"));
-        assert_eq!(cmd.args.next(), Some("1"));
-        assert_eq!(cmd.args.next(), Some("2"));
-        assert_eq!(cmd.args.next(), Some("3"));
-        assert_eq!(cmd.args.next(), None);
+        if let Cmd::Invoke(Invoke { binary, mut args }) = cmd {
+            assert_eq!(binary, OsStr::new("echo"));
+            assert_eq!(args.next(), Some("1"));
+            assert_eq!(args.next(), Some("2"));
+            assert_eq!(args.next(), Some("3"));
+            assert_eq!(args.next(), None);
+        } else {
+            assert!(false);
+        }
+    }
+
+    #[test]
+    fn test_exit_builtin() {
+        let cmd = Cmd::try_from("exit").unwrap();
+
+        if let Cmd::Builtin(Builtin::Exit(status)) = cmd {
+            assert_eq!(status, 0);
+        } else {
+            assert!(false);
+        }
     }
 
     #[test]
@@ -186,16 +230,16 @@ mod test {
             Expression::Compound(box Compound {
                 op: Op::Semicolon,
                 left:
-                    Expression::Cmd(Cmd {
+                    Expression::Cmd(Cmd::Invoke(Invoke {
                         binary: binary_left,
                         args: mut args_left,
-                    }),
+                    })),
 
                 right:
-                    Expression::Cmd(Cmd {
+                    Expression::Cmd(Cmd::Invoke(Invoke {
                         binary: binary_right,
                         args: mut args_right,
-                    }),
+                    })),
             }) => {
                 assert_eq!(binary_left, OsStr::new("echo"));
                 assert_eq!(args_left.next(), Some("1"));
@@ -217,16 +261,16 @@ mod test {
             Expression::Compound(box Compound {
                 op: Op::And,
                 left:
-                    Expression::Cmd(Cmd {
+                    Expression::Cmd(Cmd::Invoke(Invoke {
                         binary: binary_left,
                         args: mut args_left,
-                    }),
+                    })),
 
                 right:
-                    Expression::Cmd(Cmd {
+                    Expression::Cmd(Cmd::Invoke(Invoke {
                         binary: binary_right,
                         args: mut args_right,
-                    }),
+                    })),
             }) => {
                 assert_eq!(binary_left, OsStr::new("echo"));
                 assert_eq!(args_left.next(), Some("1"));

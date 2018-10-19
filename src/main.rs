@@ -23,6 +23,8 @@ fn main() -> Result<(), io::Error> {
             }
 
             Err(ParseError::EmptyLine) => {}
+
+            Err(ParseError::NoCmd) => {}
         }
     }
 }
